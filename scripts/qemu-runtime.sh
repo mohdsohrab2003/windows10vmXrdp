@@ -1,48 +1,180 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-: "${VM_RAM:=8G}"
-: "${VM_CPUS:=4}"
+# ============================================================
+# Windows 10 QEMU Runtime
+# ============================================================
+
+: "${VM_RAM:=4G}"
+: "${VM_CPUS:=2}"
+
 : "${VM_DISK:=/data/windows10.qcow2}"
+
 : "${RDP_PORT:=3389}"
-: "${NOVNC_PORT:=6080}"
 
-# QEMU runs headless. RDP is the normal desktop transport.
-# noVNC is started as a secondary emergency console.
-qemu-system-x86_64 \
-  -enable-kvm \
-  -machine q35,accel=kvm \
-  -cpu host \
-  -smp "${VM_CPUS}" \
-  -m "${VM_RAM}" \
-  -drive "file=${VM_DISK},if=virtio,format=qcow2,cache=none,aio=native" \
-  -device virtio-net-pci,netdev=net0 \
-  -netdev "user,id=net0,hostfwd=tcp::${RDP_PORT}-:3389" \
-  -boot order=c \
-  -display none \
-  -monitor none \
-  -serial none \
-  -daemonize \
-  -pidfile /run/qemu/windows.pid \
-  -D /var/log/qemu/windows.log
+: "${DISK_IF:=ide}"
+: "${NET_MODEL:=e1000}"
 
-# QEMU VNC server is intentionally not enabled in the fast runtime profile.
-# RDP is much lighter for normal Windows desktop use.
-log() { printf '[windows10vm] %s\n' "$*"; }
-
-log "Windows VM started with KVM."
-log "RDP host port: ${RDP_PORT}"
-log "VM RAM: ${VM_RAM}; vCPU: ${VM_CPUS}"
-
-cleanup() {
-  if [[ -f /run/qemu/windows.pid ]]; then
-    kill "$(cat /run/qemu/windows.pid)" 2>/dev/null || true
-  fi
+log() {
+    printf '[windows10vm-runtime] %s\n' "$*"
 }
-trap cleanup EXIT INT TERM
 
-while kill -0 "$(cat /run/qemu/windows.pid)" 2>/dev/null; do
-  sleep 5
+die() {
+    printf '[windows10vm-runtime] ERROR: %s\n' "$*" >&2
+    exit 1
+}
+
+# ------------------------------------------------------------
+# Validate disk
+# ------------------------------------------------------------
+
+[[ -f "$VM_DISK" ]] || die \
+    "Windows disk not found: $VM_DISK"
+
+# ------------------------------------------------------------
+# Detect KVM / TCG
+# ------------------------------------------------------------
+
+if [[ -e /dev/kvm && -r /dev/kvm && -w /dev/kvm ]]; then
+
+    ACCEL_ARGS=(
+        "-enable-kvm"
+        "-cpu"
+        "host"
+    )
+
+    log "KVM detected."
+    log "Using KVM hardware acceleration."
+
+else
+
+    ACCEL_ARGS=(
+        "-accel"
+        "tcg,thread=multi"
+        "-cpu"
+        "max"
+    )
+
+    log "KVM unavailable."
+    log "Using TCG software emulation."
+
+fi
+
+# ------------------------------------------------------------
+# Storage
+# ------------------------------------------------------------
+
+case "$DISK_IF" in
+
+    virtio)
+        DISK_ARGS=(
+            "-drive"
+            "file=${VM_DISK},if=virtio,format=qcow2,cache=none,aio=threads"
+        )
+        ;;
+
+    ide|*)
+        DISK_ARGS=(
+            "-drive"
+            "file=${VM_DISK},if=ide,format=qcow2,cache=writeback"
+        )
+        ;;
+
+esac
+
+# ------------------------------------------------------------
+# Network
+# ------------------------------------------------------------
+
+case "$NET_MODEL" in
+
+    virtio)
+        NETWORK_DEVICE="virtio-net-pci"
+        ;;
+
+    e1000|*)
+        NETWORK_DEVICE="e1000"
+        ;;
+
+esac
+
+# ------------------------------------------------------------
+# Prepare runtime directory
+# ------------------------------------------------------------
+
+mkdir -p /run/qemu /var/log/qemu
+
+rm -f /run/qemu/windows.pid
+
+log "Starting Windows 10..."
+log "RAM: ${VM_RAM}"
+log "vCPU: ${VM_CPUS}"
+log "Disk: ${VM_DISK}"
+log "Disk interface: ${DISK_IF}"
+log "Network: ${NET_MODEL}"
+log "RDP port: ${RDP_PORT}"
+
+# ------------------------------------------------------------
+# Start QEMU
+# ------------------------------------------------------------
+
+qemu-system-x86_64 \
+    "${ACCEL_ARGS[@]}" \
+    -machine q35 \
+    -smp "${VM_CPUS}" \
+    -m "${VM_RAM}" \
+    "${DISK_ARGS[@]}" \
+    -device "${NETWORK_DEVICE},netdev=net0" \
+    -netdev "user,id=net0,hostfwd=tcp::${RDP_PORT}-:3389" \
+    -boot order=c \
+    -vga std \
+    -display none \
+    -monitor none \
+    -serial none \
+    -daemonize \
+    -pidfile /run/qemu/windows.pid \
+    -D /var/log/qemu/windows.log
+
+# ------------------------------------------------------------
+# Verify QEMU started
+# ------------------------------------------------------------
+
+sleep 3
+
+if [[ ! -f /run/qemu/windows.pid ]]; then
+    die "QEMU did not create its PID file."
+fi
+
+QEMU_PID="$(cat /run/qemu/windows.pid)"
+
+if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+
+    log "QEMU exited during startup."
+
+    if [[ -f /var/log/qemu/windows.log ]]; then
+        tail -100 /var/log/qemu/windows.log >&2
+    fi
+
+    exit 1
+fi
+
+log "Windows VM started successfully."
+log "QEMU PID: ${QEMU_PID}"
+log "RDP public/container port: ${RDP_PORT}"
+log "Acceleration: ${VM_ACCEL:-auto}"
+
+# ------------------------------------------------------------
+# Keep container alive while QEMU runs
+# ------------------------------------------------------------
+
+while kill -0 "$QEMU_PID" 2>/dev/null; do
+    sleep 5
 done
+
+log "QEMU process stopped."
+
+if [[ -f /var/log/qemu/windows.log ]]; then
+    tail -100 /var/log/qemu/windows.log || true
+fi
 
 exit 1

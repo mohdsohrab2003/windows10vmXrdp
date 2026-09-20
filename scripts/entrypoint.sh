@@ -1,43 +1,158 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-: "${VM_RAM:=8G}"
-: "${VM_CPUS:=4}"
-: "${DISK_SIZE:=80G}"
+# ============================================================
+# Windows 10 VM - Railway / KVM compatible entrypoint
+# ============================================================
+
+: "${VM_RAM:=4G}"
+: "${VM_CPUS:=2}"
+: "${DISK_SIZE:=40G}"
+
 : "${VM_DISK:=/data/windows10.qcow2}"
 : "${WINDOWS_ISO:=/iso/Win10.iso}"
+
 : "${FORCE_INSTALL:=0}"
+: "${SKIP_INSTALL:=0}"
+
 : "${RDP_PORT:=3389}"
 : "${NOVNC_PORT:=6080}"
 
-log() { printf '[windows10vm] %s\n' "$*"; }
-die() { printf '[windows10vm] ERROR: %s\n' "$*" >&2; exit 1; }
+# Storage/network defaults.
+#
+# IDE + e1000 are intentionally used as the compatibility defaults
+# because a fresh Windows 10 installer may not contain VirtIO drivers.
+#
+# Once VirtIO drivers are installed inside Windows, you can use:
+#
+# DISK_IF=virtio
+# NET_MODEL=virtio-net-pci
+#
+: "${DISK_IF:=ide}"
+: "${NET_MODEL:=e1000}"
 
-[[ -e /dev/kvm ]] || die \
-  "KVM is unavailable (/dev/kvm missing). This VM intentionally does not fall back to slow TCG emulation."
+log() {
+    printf '[windows10vm] %s\n' "$*"
+}
 
-[[ -r /dev/kvm && -w /dev/kvm ]] || die \
-  "/dev/kvm exists but is not accessible. Start the container with --device /dev/kvm."
+die() {
+    printf '[windows10vm] ERROR: %s\n' "$*" >&2
+    exit 1
+}
 
-mkdir -p /data /iso /run/qemu /var/log/qemu
+# ------------------------------------------------------------
+# Validate required programs
+# ------------------------------------------------------------
+
+command -v qemu-system-x86_64 >/dev/null 2>&1 || \
+    die "qemu-system-x86_64 is not installed."
+
+command -v qemu-img >/dev/null 2>&1 || \
+    die "qemu-img is not installed."
+
+# ------------------------------------------------------------
+# Detect virtualization mode
+# ------------------------------------------------------------
+
+if [[ -e /dev/kvm && -r /dev/kvm && -w /dev/kvm ]]; then
+    VM_ACCEL="kvm"
+    VM_CPU="host"
+
+    log "KVM detected."
+    log "Acceleration: KVM"
+    log "CPU model: host"
+else
+    VM_ACCEL="tcg"
+    VM_CPU="max"
+
+    log "KVM unavailable (/dev/kvm missing)."
+    log "Using QEMU TCG software emulation."
+    log "CPU model: max"
+fi
+
+export VM_ACCEL
+export VM_CPU
+
+# ------------------------------------------------------------
+# Prepare directories
+# ------------------------------------------------------------
+
+mkdir -p \
+    /data \
+    /iso \
+    /run/qemu \
+    /var/log/qemu
+
+# ------------------------------------------------------------
+# Create persistent Windows disk
+# ------------------------------------------------------------
 
 if [[ ! -f "$VM_DISK" ]]; then
-  log "Creating $DISK_SIZE Windows disk at $VM_DISK"
-  qemu-img create -f qcow2 "$VM_DISK" "$DISK_SIZE"
+    log "Windows disk does not exist."
+    log "Creating $DISK_SIZE disk:"
+    log "$VM_DISK"
+
+    qemu-img create \
+        -f qcow2 \
+        "$VM_DISK" \
+        "$DISK_SIZE"
+
+    log "Windows disk created."
+else
+    log "Using existing Windows disk:"
+    log "$VM_DISK"
+
+    qemu-img info "$VM_DISK" || true
 fi
+
+# ------------------------------------------------------------
+# Force installation
+# ------------------------------------------------------------
 
 if [[ "$FORCE_INSTALL" == "1" ]]; then
-  [[ -f "$WINDOWS_ISO" ]] || die "Installer ISO not found: $WINDOWS_ISO"
-  exec /usr/local/bin/qemu-install.sh
+
+    [[ -f "$WINDOWS_ISO" ]] || die \
+        "Windows ISO not found: $WINDOWS_ISO"
+
+    log "FORCE_INSTALL=1"
+    log "Starting Windows installation mode."
+
+    exec /usr/local/bin/qemu-install.sh
 fi
 
-# A marker is created after the first installer boot. If the marker doesn't exist,
-# start the installation profile. Set SKIP_INSTALL=1 only if the disk is already
-# a fully installed Windows system.
-if [[ "${SKIP_INSTALL:-0}" != "1" && ! -f /data/.windows-installed ]]; then
-  [[ -f "$WINDOWS_ISO" ]] || die \
-    "No installed Windows marker and no ISO at $WINDOWS_ISO. Mount a Windows 10 ISO or set SKIP_INSTALL=1 for an existing disk."
-  exec /usr/local/bin/qemu-install.sh
+# ------------------------------------------------------------
+# Existing Windows installation
+# ------------------------------------------------------------
+
+if [[ "$SKIP_INSTALL" == "1" ]]; then
+
+    log "SKIP_INSTALL=1"
+    log "Starting existing Windows disk."
+
+    exec /usr/local/bin/qemu-runtime.sh
 fi
+
+# ------------------------------------------------------------
+# First boot
+# ------------------------------------------------------------
+
+if [[ ! -f /data/.windows-installed ]]; then
+
+    [[ -f "$WINDOWS_ISO" ]] || die \
+        "Windows installation ISO not found at:"
+    log "$WINDOWS_ISO"
+
+    log "No /data/.windows-installed marker found."
+    log "Starting Windows installation."
+
+    exec /usr/local/bin/qemu-install.sh
+fi
+
+# ------------------------------------------------------------
+# Normal Windows runtime
+# ------------------------------------------------------------
+
+log "Windows installation marker found."
+log "Starting Windows runtime."
 
 exec /usr/local/bin/qemu-runtime.sh
