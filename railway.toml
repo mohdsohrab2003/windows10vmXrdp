@@ -1,0 +1,11 @@
+# This file documents the intended Railway build configuration.
+# A normal Railway Service currently cannot expose /dev/kvm, so this image is
+# expected to fail fast there rather than silently use slow software emulation.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3

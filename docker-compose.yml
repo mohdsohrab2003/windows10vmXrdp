@@ -1,0 +1,17 @@
+services:
+  windows10:
+    build: .
+    container_name: windows10vm
+    devices:
+      - /dev/kvm:/dev/kvm
+    ports:
+      - "6080:6080"
+      - "3389:3389"
+    volumes:
+      - ./data:/data
+      - ./iso:/iso:ro
+    environment:
+      VM_RAM: 8G
+      VM_CPUS: 4
+      DISK_SIZE: 80G
+    restart: unless-stopped

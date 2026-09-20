@@ -1,0 +1,7 @@
+data/
+iso/
+.git/
+.github/
+*.log
+*.qcow2
+*.iso
